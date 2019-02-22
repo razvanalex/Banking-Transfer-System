@@ -1,0 +1,177 @@
+-------------------------------------------------------------------------------
+                                Tema 2 - PC
+-------------------------------------------------------------------------------
+
+Autor: Smadu Razvan-Alexandru 325CB
+
+Fisiere include:
+  - README
+  - Makefile
+  - server.c
+  - client.c
+  - ibank.h
+
+README
+  Structuri utilizate
+    Pentru baza de date:
+      TDBRecord - contine date despre un utilizator cum ar fi numele, prenumele,
+                  numarul de card, pinul, parola, soldul si daca este blocat sau
+                  nu cardul.
+      TDataBase - structura care retine numarul de inregistrari si un array de
+                  inregistrari de tipul TDBRecord.
+    
+    Pentru sesiuni:
+      TSession - contine datele unei sesiuni (unui client conectat la server)
+                 cum ar fi numarul de incercari de pin pentru ultimul card
+                 introdus, daca sesiunea este deschisa sau nu, numarul de 
+                 card asocial sesiunii respective dupa login, daca sesiunea 
+                 curenta este in timpul unei tranzactii (adica se asteapta 
+                 confirmarea de la client), destinatia unde trebuie sa ajunga
+                 banii (in cazul tranzactiei), suma de bani care trebuie
+                 trimisa si daca sesiunea se afla in unlock mode.
+    
+    Mesajele sunt trimise impachetate in structura TRequest care retine tipul
+    pachetului si mesajul asociat pachetului. Tipurile au lungime fixa de 4
+    caractere, pentru a nu ocupa foarte mult din mesaj, iar restul caracterelor
+    (in cazul de fata 59) sunt destinate mesajului propriu-zis. Tipuri definite:
+
+      LOGI - un pachet de login, in care sunt impachetate numarul de card si
+             pinul pentru logare, intr-un string, separate prin spatiu.
+      LOGO - un pachet de tip logout prin care se anunta serverul ca se doreste
+             delogarea unui client. Payload-ul pachetului nu este utilizat.
+      SOLD - o cerere prin care se cere trimiterea soldului curet catre client.
+             Payload-ul nu este utilizat.
+      TRAN - o cerere prin care un client anunta faptul ca doreste sa realizeze
+             tranzactie. Datele tranzactiei se afla in payload-ul pachetului
+             (cardul destinatie si suma de bani) fiind separate prin spatiu.
+      ANYC - un pachet ce contine orice caractere in payload. Este folosit
+             pentru confirmarea tranzactiei. In cazul in care pe sesiunea
+             respectiva nu exista o tranzacti in curs, se returneaza eroare.
+      QUIT - cerere de inchidere a serverului sau a clientului.
+      ULK1 - clientul a trimis o cerere de deblocare card. Se verifica daca 
+             respectivul card exista sau blocat. Se trimite apoi o cerere prin
+             care se solicita parola de deblocare.
+      ULK2 - clientul a trimis parola de deblocare. Se verifica daca aceasta
+             este corecta si se deblocheaza cardul.
+    
+    In general, raspusul trimis de server are acelasi tip ca si cererea trimisa
+    din partea clientului. 
+
+  Mecanismele implementate
+    1. Login
+      Clientul se conecteaza la server. Trimite o cerere de login. Serverul
+      verifica existenta cardului, daca exista sesiune deschisa pe acel card
+      verifica pinul si trimite raspuns catre client. In cazul in care se
+      introduce de 3 ori un pin gresit, fara a reseta contorul pe sesiunea
+      respectiva, se blocheaza cardul (se retine in baza de date). Retinerea
+      incercarilor se face pe sesiune, prin urmare cat timp nu se blocheaza un
+      card, se poate incerca logarea de oricate ori, de pe orice client. Dupa
+      prima logare (dintre toti clientii din acelasi timp) ceilalti clienti nu
+      vor mai putea sa se logheze. In clientul logat se retine faptul ca exista
+      o sesiune activa si astfel nu se va permite relogarea in timpul sesiunii.
+
+    Nota: In server, toate apelurile blocante sunt multiplexate. Prin urmare,
+          serverul nu va astepta dupa niciun client. 
+    
+    2. Logout
+      In cazul in care serverul primeste un pachet LOGO, atunci se cauta inchide
+      sesiunea deja existeta si se trimite un raspuns catre client pentru
+      confirmarea deconectarii. In cazul in care clientul nu era logat anterior,
+      acesta va procesa informatia (se verifica daca variabila care retine
+      sesiunea deschisa era 1) si in cazul in care clientul nu este logat, ii
+      trimite utilizatorului mesajul ca nu este autentificat. 
+    
+    3. Listsold
+      Clientul trimite catre server o cerere de tip SOLD. Serverul primeste 
+      cererea si impacheteaza mesajul catre client (alte operatii nu sunt 
+      necesare, deoarece se ia valoarea direct din baza de date, pe cardul
+      asociat clientului care a trimis cererea).
+
+    4. Transfer
+      Modul de transfer contine 2 etape: etapa in care se transmite cererea si
+      etapa in care se realizeaza transferul. In prima etapa, clientul transmite
+      o cerere de transfer. Serverul verifica daca exista numarul de card, daca
+      exista fonduri pentru realizarea tranzactiei si se trimite catre client
+      cererea de confirmare. Se seteaza, de asemenea, clientul pe "in timpul
+      tranzactiei" pentru a putea realiza faza a doua in siguranta. Clientul
+      primeste cererea, si trimite un mesaj (cel putin y pentru DA si orice
+      altceva pentru NU). In acest timp, serverul nu ramane blocat, iar cand
+      primeste un pachet de tip ANYC, verifica daca pe sesiunea respectiva
+      exista o tranzactie sau nu. In cazul in care nu este o tranzactie in curs,
+      se transmite eroare. In cazul opus, se verifica raspunsul, iar in caz
+      afirmativ se realizeaza transferul de bani si se incheie tranzactia
+      (variabila care retine "in timpul tranzactiei" se face 0).
+    
+    5. Quit
+      Cand un server primeste un pachet QUIT inseamna ca se doreste inchiderea
+      unei anumite sesiuni. Prin urmare, se face logout daca este cazul (se
+      reseteaza parametrii de pe sesiunea respectiva, pentru a mentine o zona
+      curata de memorie atunci cand se conecteaza alt client pe acelasi file
+      descriptor). Quit si logout sunt echivalente din punctul de vedere al
+      serverului.
+    
+    6. Unlock
+      Modul de unlock se realizeaza pe un socket UDP si este in doua etape:
+      - In prima etapa se trimite cererea de unlock pentru ultimul card pentru
+        care s-a incercat logarea. Se testeaza daca exista vreo cerere de
+        deblocare anterioara de la alt client, se verifica pentru existenta
+        numarului de card si daca respectivul card a fost blocat sau nu. In
+        cazul in care este blocat, se trimite o cerere prin care se solicita
+        parola secreta de deblocare. Pachetul din aceasta etapa este ULK1.
+      - In a doua etapa, clientul introduce parola secreta si trimite un pachet
+        de tip ULK2 catre server. Serverul o sa verifice parola si in cazul in
+        care este corecta, se reseteaza contorul de incercari, se deblocheaza
+        cardul se inchide modul de unlock pe sesiunea respectiva si se anunta
+        clientul ca s-a deblocat cardul. 
+
+  Inchiderea serverului inseamna trimiterea instiintarii catre toti clientii
+  conectati, inchiderea legaturii si in final inchiderea socketului si a
+  programului. Intrucat serverul se inchide, nu mai are sens ca si clientii sa
+  ramana deschisi, prin urmare se vor inchide automat dupa primirea instiintarii
+  de inchidere a serverului.
+
+  Clientul, inainte de a trimite pachetele, face verificari minimaliste precum:
+    - verifica daca clientul este logat sau nu
+    - comanda introdusa este corecta (nu se trimite la server o comanda care un
+      este implementata)
+  Corectitudinea parametrilor se verifica la server, clientul doar impacheteaza
+  parametrii si ii transmite.
+
+  In client majoritatea apelurilor blocante nu sunt multiplexate pentru a
+  mentine flow-ul programului. Se face selectia doar intre stdin in momentul
+  transmiterii de comenzi si primirea unui mesaj de QUIT din partea serverului.
+
+  Serverul, pe de alta parte, multiplexeaza toatea apelurile blocante; fiind
+  disponibil pentru orice client, in orice moment, la orice operatie. 
+
+  Sesiunile sunt tinute intr-un array, fiecare indice reprezentant file
+  descriptorul pentru un anumit client (s-a facut si un decalaj de 4 pozitii,
+  deoarece fd=4 trebuie sa reprezinte index=0). 
+
+  In fisierul de log sunt retinute toate operatiile (si cele invalide) realizate
+  de catre client. Practic, tot ce se afiseaza la stdin, se pune si in fisierul
+  de log.
+
+  Alte detalii despre pachetele transmise:
+    Fiecare pachet are o dimensiune maxima de 64 bytes, fiind cuprinzatoare
+    pentru acest scop (transfer de cereri). S-a ales un numar de 4 caractere
+    pentru tipul pachetului (al 5lea caracter este '\0') care desemenaza o 
+    instructiune cat de cat sugestiva. Netransmiterea intregii comenzi asigura
+    posibilitatea trimiterii unui volum mai mare de parametrii pentru 
+    procesarea cererilor. Restul memoriei folosite in payload sunt suficiente
+    pentru a transmite parametrii comenzilor. 
+    
+  Clientul transmite utilizatorului doar mesajul "Sesiune deja deschisa" 
+  prefixat cu "IBANK>". De asemenea, serverul afiseaza local niste mesaje in 
+  care se anunta cand un utilizator s-a conectat/cand s-a deconectat. In caz de 
+  eroare in server, se afiseaza eroare la stderr.
+    
+  Comportamete nedefinite
+    Atunci cand se iese cu Ctrl+C din client, serverul nu va actualiza sesiunea.
+    Pentru acest lucru, trebuie implementat un mecanism prin care se verifica 
+    periodic (de exemplu la 5 minute) daca mai sunt disponibili clientii.
+    Ca si comportament, in situatia actuala se vor detecta sesiuni active, chiar 
+    daca respectivul client a inchis (necorespunzator) aplicatia. Se recomanda
+    folosirea comenzii quit pentru a iesi.
+    
+   Nota: Identarea codului a fost facuta cu tab-uri de lungime 4.
